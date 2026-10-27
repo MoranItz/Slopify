@@ -18,6 +18,7 @@ import { usePlayer } from "../player/PlayerProvider";
 import TrackRow from "../components/TrackRow";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import { createPlaylist, addTrackToPlaylist } from "../db/localDb";
+import { useLikedTracks } from "../hooks/useLikedTracks";
 import { colors, shared } from "../theme";
 
 export default function DiscoverScreen() {
@@ -35,6 +36,7 @@ export default function DiscoverScreen() {
   const [importingPlaylist, setImportingPlaylist] = useState(false);
   const [importResult, setImportResult] = useState<string | null>(null);
 
+  const likedIds = useLikedTracks();
   const { playTrack } = usePlayer();
 
   // Debounced search
@@ -77,7 +79,7 @@ export default function DiscoverScreen() {
     try {
       await ingestTrack(track.id); // downloads on server (queued, 2 at a time)
       setError(null);
-      playTrack(track);
+      playTrack(track, "discover");
     } catch (e) {
       setError("Download failed: " + String(e));
     } finally {
@@ -124,60 +126,99 @@ export default function DiscoverScreen() {
 
   return (
     <View style={shared.screen}>
-      {/* Search bar + Import button row */}
-      <View style={styles.topRow}>
-        <TextInput
-          value={query}
-          onChangeText={setQuery}
-          placeholder="Search YouTube…"
-          placeholderTextColor={colors.textSecondary}
-          style={[shared.searchInput, styles.searchFlex]}
-        />
-        <TouchableOpacity
-          style={styles.importButton}
-          onPress={() => setShowPlaylistModal(true)}
-          activeOpacity={0.7}
-        >
-          <Ionicons name="list" size={18} color={colors.text} />
-          <Ionicons
-            name="add"
-            size={14}
-            color={colors.accent}
-            style={{ marginLeft: -4, marginTop: -8 }}
+      <View style={styles.centeredContainer}>
+        {/* Search bar + Import button row */}
+        <View style={styles.topRow}>
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Search YouTube…"
+            placeholderTextColor={colors.textSecondary}
+            style={styles.searchInput}
+            autoCorrect={false}
           />
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.importButton}
+            onPress={() => setShowPlaylistModal(true)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="list" size={18} color={colors.text} />
+            <Ionicons
+              name="add"
+              size={14}
+              color={colors.accent}
+              style={{ marginLeft: -4, marginTop: -8 }}
+            />
+          </TouchableOpacity>
+        </View>
+
+        {error && <Text style={styles.error}>{error}</Text>}
+
+        {/* Search results box in a distinct container */}
+        <View style={styles.resultsBox}>
+          {searching && results.length === 0 ? (
+            <View style={styles.statusBox}>
+              <ActivityIndicator size="large" color={colors.accent} />
+              <Text style={styles.statusText}>Searching YouTube…</Text>
+            </View>
+          ) : results.length > 0 ? (
+            <>
+              {searching && (
+                <View style={styles.inlineSearching}>
+                  <ActivityIndicator size="small" color={colors.accent} />
+                  <Text style={styles.inlineSearchingText}>Updating…</Text>
+                </View>
+              )}
+              <FlatList
+                data={results}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.listContent}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item }) => (
+                  <TrackRow
+                    track={item}
+                    isLiked={likedIds.has(item.id)}
+                    onPress={() => handleTap(item)}
+                    onPlaylistPress={() => setSelectedTrackForPlaylist(item)}
+                    onMorePress={() => setSelectedTrackForPlaylist(item)}
+                    busy={busyIds.has(item.id)}
+                  />
+                )}
+              />
+            </>
+          ) : !searching && query.trim().length >= 3 ? (
+            <View style={styles.statusBox}>
+              <Ionicons
+                name="search-outline"
+                size={40}
+                color={colors.textSecondary}
+              />
+              <Text style={styles.statusTitle}>No results found</Text>
+              <Text style={styles.statusSub}>
+                Try searching for a different song or artist
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.statusBox}>
+              <Ionicons
+                name="musical-notes-outline"
+                size={42}
+                color={colors.border}
+              />
+              <Text style={styles.statusTitle}>Discover Music</Text>
+              <Text style={styles.statusSub}>
+                Search results will show up here
+              </Text>
+            </View>
+          )}
+        </View>
       </View>
-
-      {searching && (
-        <ActivityIndicator
-          color={colors.accent}
-          style={{ marginVertical: 8 }}
-        />
-      )}
-      {error && <Text style={styles.error}>{error}</Text>}
-
-      <FlatList
-        data={results}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <TrackRow
-            track={item}
-            onPress={() => handleTap(item)}
-            onMorePress={() => setSelectedTrackForPlaylist(item)}
-            busy={busyIds.has(item.id)}
-          />
-        )}
-        ListEmptyComponent={
-          !searching && query.trim().length >= 3 ? (
-            <Text style={styles.empty}>No results</Text>
-          ) : undefined
-        }
-      />
 
       <AddToPlaylistModal
         track={selectedTrackForPlaylist}
         visible={!!selectedTrackForPlaylist}
         onClose={() => setSelectedTrackForPlaylist(null)}
+        autoLikeIfNew={true}
       />
 
       {/* ── Import YouTube Playlist Modal ─────────────────────── */}
@@ -277,38 +318,102 @@ export default function DiscoverScreen() {
 }
 
 const styles = StyleSheet.create({
+  centeredContainer: {
+    width: "92%",
+    maxWidth: 560,
+    alignSelf: "center",
+    flex: 1,
+    paddingTop: 8,
+  },
   topRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 8,
-    paddingRight: 16,
-  },
-  searchFlex: {
-    flex: 1,
+    width: "100%",
     marginBottom: 10,
+  },
+  searchInput: {
+    flex: 1,
+    backgroundColor: colors.card,
+    color: colors.text,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 20,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   importButton: {
     flexDirection: "row",
     alignItems: "center",
     backgroundColor: colors.card,
     borderRadius: 20,
-    padding: 10,
-    marginLeft: 8,
-    marginBottom: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginLeft: 10,
     borderWidth: 1,
     borderColor: colors.border,
   },
   error: {
     color: "#ff5555",
-    paddingHorizontal: 14,
-    paddingBottom: 4,
+    paddingHorizontal: 8,
+    paddingBottom: 6,
     fontSize: 13,
   },
-  empty: {
+  resultsBox: {
+    width: "100%",
+    flex: 1,
+    maxHeight: "84%",
+    backgroundColor: colors.surface,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: "hidden",
+    marginBottom: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+  listContent: {
+    paddingVertical: 8,
+  },
+  inlineSearching: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 6,
+    backgroundColor: "rgba(255, 46, 147, 0.08)",
+  },
+  inlineSearchingText: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  statusBox: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 32,
+    minHeight: 220,
+  },
+  statusText: {
     color: colors.textSecondary,
-    textAlign: "center",
-    marginTop: 32,
     fontSize: 14,
+    marginTop: 12,
+  },
+  statusTitle: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: "700",
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  statusSub: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    textAlign: "center",
   },
 
   // ── Modal styles ──────────────────────────────────────

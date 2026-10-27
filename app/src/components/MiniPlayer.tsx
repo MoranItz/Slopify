@@ -28,14 +28,16 @@ export default function MiniPlayer({ onPress }: Props) {
     duration,
     next,
     previous,
-    queueIndex,
+    canGoNext,
+    canGoPrevious,
   } = usePlayer();
-
-  const canGoPrevious = queueIndex > 0;
 
   // Fresh refs so PanResponder closure is never stale
   const canGoPreviousRef = useRef(canGoPrevious);
   canGoPreviousRef.current = canGoPrevious;
+
+  const canGoNextRef = useRef(canGoNext);
+  canGoNextRef.current = canGoNext;
 
   const nextRef = useRef(next);
   nextRef.current = next;
@@ -58,7 +60,8 @@ export default function MiniPlayer({ onPress }: Props) {
       onMoveShouldSetPanResponder: (_, gestureState) => {
         const isLeft =
           gestureState.dx < -6 &&
-          Math.abs(gestureState.dx) > Math.abs(gestureState.dy);
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy) &&
+          canGoNextRef.current;
         const isRight =
           gestureState.dx > 6 &&
           Math.abs(gestureState.dx) > Math.abs(gestureState.dy) &&
@@ -68,7 +71,8 @@ export default function MiniPlayer({ onPress }: Props) {
       onMoveShouldSetPanResponderCapture: (_, gestureState) => {
         const isLeft =
           gestureState.dx < -6 &&
-          Math.abs(gestureState.dx) > Math.abs(gestureState.dy);
+          Math.abs(gestureState.dx) > Math.abs(gestureState.dy) &&
+          canGoNextRef.current;
         const isRight =
           gestureState.dx > 6 &&
           Math.abs(gestureState.dx) > Math.abs(gestureState.dy) &&
@@ -87,6 +91,9 @@ export default function MiniPlayer({ onPress }: Props) {
         if (!isAnimatingRef.current) {
           if (gestureState.dx > 0 && !canGoPreviousRef.current) {
             // Cannot go back before first track: no sliding right allowed
+            slideX.setValue(0);
+          } else if (gestureState.dx < 0 && !canGoNextRef.current) {
+            // Cannot go forward past last track: no sliding left allowed
             slideX.setValue(0);
           } else {
             slideX.setValue(gestureState.dx);
@@ -107,7 +114,10 @@ export default function MiniPlayer({ onPress }: Props) {
         if (isAnimatingRef.current) return;
 
         // Slide left -> Next song
-        if (gestureState.dx < -45 || gestureState.vx < -0.3) {
+        if (
+          (gestureState.dx < -45 || gestureState.vx < -0.3) &&
+          canGoNextRef.current
+        ) {
           isAnimatingRef.current = true;
           Animated.timing(slideX, {
             toValue: -width * 0.7,

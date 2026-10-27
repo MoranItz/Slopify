@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -30,14 +30,17 @@ export default function PlayerScreen({ onClose }: Props) {
     togglePlay,
     next,
     previous,
-    queueIndex,
+    seekTo,
+    canGoNext,
+    canGoPrevious,
   } = usePlayer();
-
-  const canGoPrevious = queueIndex > 0;
 
   // Fresh refs so PanResponder closure is never stale
   const canGoPreviousRef = useRef(canGoPrevious);
   canGoPreviousRef.current = canGoPrevious;
+
+  const canGoNextRef = useRef(canGoNext);
+  canGoNextRef.current = canGoNext;
 
   const nextRef = useRef(next);
   nextRef.current = next;
@@ -47,6 +50,92 @@ export default function PlayerScreen({ onClose }: Props) {
 
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+
+  const seekToRef = useRef(seekTo);
+  seekToRef.current = seekTo;
+
+  const durationRef = useRef(duration);
+  durationRef.current = duration;
+
+  // ── Seek bar interactive scrubbing state ───────────────────
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubRatio, setScrubRatio] = useState(0);
+  const [optimisticTime, setOptimisticTime] = useState<number | null>(null);
+  const optimisticClearTimeoutRef = useRef<any>(null);
+  const isScrubbingRef = useRef(false);
+  const seekTrackWidthRef = useRef(1);
+  const initialScrubRatioRef = useRef(0);
+  const seekYRangeRef = useRef<{ top: number; bottom: number }>({
+    top: 0,
+    bottom: 0,
+  });
+  const seekRowRef = useRef<any>(null);
+
+  // Clear optimistic time as soon as native player catches up to sought position
+  useEffect(() => {
+    if (optimisticTime !== null) {
+      if (Math.abs(currentTime - optimisticTime) < 1.0) {
+        setOptimisticTime(null);
+      }
+    }
+  }, [currentTime, optimisticTime]);
+
+  const seekPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: (evt) => {
+        if (optimisticClearTimeoutRef.current) {
+          clearTimeout(optimisticClearTimeoutRef.current);
+        }
+        isScrubbingRef.current = true;
+        const width = seekTrackWidthRef.current || 1;
+        const initialRatio = Math.max(
+          0,
+          Math.min(1, evt.nativeEvent.locationX / width)
+        );
+        initialScrubRatioRef.current = initialRatio;
+        setScrubRatio(initialRatio);
+        setIsScrubbing(true);
+      },
+      onPanResponderMove: (_, gestureState) => {
+        const width = seekTrackWidthRef.current || 1;
+        const delta = gestureState.dx / width;
+        const newRatio = Math.max(
+          0,
+          Math.min(1, initialScrubRatioRef.current + delta)
+        );
+        setScrubRatio(newRatio);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const width = seekTrackWidthRef.current || 1;
+        const delta = gestureState.dx / width;
+        const finalRatio = Math.max(
+          0,
+          Math.min(1, initialScrubRatioRef.current + delta)
+        );
+        const targetSeconds = finalRatio * durationRef.current;
+        setOptimisticTime(targetSeconds);
+        seekToRef.current(targetSeconds);
+        setIsScrubbing(false);
+        isScrubbingRef.current = false;
+
+        // Fallback safety: hand back control to native currentTime after 600ms
+        if (optimisticClearTimeoutRef.current) {
+          clearTimeout(optimisticClearTimeoutRef.current);
+        }
+        optimisticClearTimeoutRef.current = setTimeout(() => {
+          setOptimisticTime(null);
+        }, 600);
+      },
+      onPanResponderTerminate: () => {
+        setIsScrubbing(false);
+        isScrubbingRef.current = false;
+      },
+    })
+  ).current;
 
   const insets = useSafeAreaInsets();
   const panY = useRef(new Animated.Value(height)).current;
@@ -103,7 +192,15 @@ export default function PlayerScreen({ onClose }: Props) {
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onStartShouldSetPanResponderCapture: () => false,
-      onMoveShouldSetPanResponder: (_, gestureState) => {
+      onMoveShouldSetPanResponder: (evt, gestureState) => {
+        const touchY = evt.nativeEvent.pageY;
+        if (
+          isScrubbingRef.current ||
+          (touchY >= seekYRangeRef.current.top &&
+            touchY <= seekYRangeRef.current.bottom)
+        ) {
+          return false;
+        }
         const isVertical =
           gestureState.dy > 5 &&
           Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
@@ -116,7 +213,15 @@ export default function PlayerScreen({ onClose }: Props) {
           canGoPreviousRef.current;
         return isVertical || isHorizontalLeft || isHorizontalRight;
       },
-      onMoveShouldSetPanResponderCapture: (_, gestureState) => {
+      onMoveShouldSetPanResponderCapture: (evt, gestureState) => {
+        const touchY = evt.nativeEvent.pageY;
+        if (
+          isScrubbingRef.current ||
+          (touchY >= seekYRangeRef.current.top &&
+            touchY <= seekYRangeRef.current.bottom)
+        ) {
+          return false;
+        }
         const isVertical =
           gestureState.dy > 5 &&
           Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
@@ -157,6 +262,9 @@ export default function PlayerScreen({ onClose }: Props) {
             if (gestureState.dx > 0 && !canGoPreviousRef.current) {
               // Cannot go back before first track: no sliding right allowed
               slideX.setValue(0);
+            } else if (gestureState.dx < 0 && !canGoNextRef.current) {
+              // Cannot go forward past last track: no sliding left allowed
+              slideX.setValue(0);
             } else {
               slideX.setValue(gestureState.dx);
             }
@@ -183,7 +291,10 @@ export default function PlayerScreen({ onClose }: Props) {
           if (isTrackSwitchingRef.current) return;
 
           // Slide left -> Next song
-          if (gestureState.dx < -55 || gestureState.vx < -0.35) {
+          if (
+            (gestureState.dx < -55 || gestureState.vx < -0.35) &&
+            canGoNextRef.current
+          ) {
             isTrackSwitchingRef.current = true;
             Animated.timing(slideX, {
               toValue: -width * 1.1,
@@ -276,7 +387,13 @@ export default function PlayerScreen({ onClose }: Props) {
     );
   }
 
-  const progress = duration > 0 ? currentTime / duration : 0;
+  const activeTime = isScrubbing
+    ? scrubRatio * duration
+    : optimisticTime !== null
+    ? optimisticTime
+    : currentTime;
+
+  const progress = duration > 0 ? activeTime / duration : 0;
 
   // Background overlay opacity fades as user pulls down
   const overlayOpacity = panY.interpolate({
@@ -368,13 +485,60 @@ export default function PlayerScreen({ onClose }: Props) {
             </View>
           </Animated.View>
 
-          {/* Seek bar */}
-          <View style={styles.seekRow} pointerEvents="none">
-            <Text style={styles.time}>{formatDuration(currentTime)}</Text>
-            <View style={styles.seekTrack}>
-              <View style={[styles.seekFill, { flex: Math.max(progress, 0.001) }]} />
-              <View style={{ flex: Math.max(1 - progress, 0.001) }} />
+          {/* Interactive Seek Bar */}
+          <View
+            ref={seekRowRef}
+            style={styles.seekRow}
+            onLayout={() => {
+              seekRowRef.current?.measureInWindow(
+                (_x: number, y: number, _w: number, h: number) => {
+                  if (h > 0) {
+                    seekYRangeRef.current = {
+                      top: y - 10,
+                      bottom: y + h + 10,
+                    };
+                  }
+                }
+              );
+            }}
+          >
+            <Text style={styles.time}>{formatDuration(activeTime)}</Text>
+
+            <View
+              style={styles.seekTouchArea}
+              {...seekPanResponder.panHandlers}
+              onLayout={(e) => {
+                seekTrackWidthRef.current = e.nativeEvent.layout.width;
+              }}
+            >
+              <View
+                style={[
+                  styles.seekTrack,
+                  isScrubbing && styles.seekTrackActive,
+                ]}
+              >
+                <View
+                  style={[
+                    styles.seekFill,
+                    {
+                      flex: Math.max(progress, 0.0001),
+                    },
+                  ]}
+                />
+                <View
+                  style={[
+                    styles.seekThumb,
+                    isScrubbing && styles.seekThumbActive,
+                  ]}
+                />
+                <View
+                  style={{
+                    flex: Math.max(1 - progress, 0.0001),
+                  }}
+                />
+              </View>
             </View>
+
             <Text style={styles.time}>{formatDuration(duration)}</Text>
           </View>
 
@@ -401,7 +565,12 @@ export default function PlayerScreen({ onClose }: Props) {
               />
             </Pressable>
 
-            <Pressable onPress={next} hitSlop={16} style={styles.iconBtn}>
+            <Pressable
+              onPress={next}
+              disabled={!canGoNext}
+              hitSlop={16}
+              style={[styles.iconBtn, !canGoNext && { opacity: 0.35 }]}
+            >
               <Ionicons
                 name="play-skip-forward"
                 size={32}
@@ -507,20 +676,54 @@ const styles = StyleSheet.create({
     alignItems: "center",
     width: "100%",
     marginBottom: 24,
-    gap: 10,
+    gap: 8,
+  },
+  seekTouchArea: {
+    flex: 1,
+    height: 38,
+    justifyContent: "center",
   },
   seekTrack: {
-    flex: 1,
-    height: 6,
-    borderRadius: 3,
+    height: 4,
+    borderRadius: 2,
     backgroundColor: colors.card,
     flexDirection: "row",
-    overflow: "hidden",
+    alignItems: "center",
     borderWidth: 0.5,
     borderColor: colors.border,
   },
+  seekTrackActive: {
+    height: 6,
+    borderRadius: 3,
+  },
   seekFill: {
+    height: "100%",
     backgroundColor: colors.accent,
+    borderRadius: 2,
+  },
+  seekThumb: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#FFF",
+    marginLeft: -5,
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  seekThumbActive: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    marginLeft: -8,
+    backgroundColor: "#FFF",
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.9,
+    shadowRadius: 8,
+    elevation: 6,
   },
   time: {
     color: colors.textSecondary,

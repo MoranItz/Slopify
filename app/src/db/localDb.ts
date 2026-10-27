@@ -3,6 +3,7 @@ import { Playlist, Track } from "../types";
 import { playlistEvents } from "./playlistEvents";
 
 const DB_NAME = "slopify_local.db";
+export const LIKED_SONGS_ID = "liked_songs";
 
 let dbInstance: SQLite.SQLiteDatabase | null = null;
 
@@ -44,6 +45,14 @@ export async function initDb(db: SQLite.SQLiteDatabase): Promise<void> {
       FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
       FOREIGN KEY (track_id) REFERENCES local_tracks(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS playlist_settings (
+      playlist_id TEXT PRIMARY KEY NOT NULL,
+      is_shuffled INTEGER DEFAULT 0
+    );
+
+    INSERT OR IGNORE INTO playlists (id, name, picture_uri, created_at)
+    VALUES ('liked_songs', 'Liked Songs', NULL, 0);
   `);
 }
 
@@ -62,7 +71,7 @@ export async function getPlaylists(): Promise<Playlist[]> {
     FROM playlists p
     LEFT JOIN playlist_tracks pt ON p.id = pt.playlist_id
     GROUP BY p.id
-    ORDER BY p.created_at DESC
+    ORDER BY (CASE WHEN p.id = 'liked_songs' THEN 0 ELSE 1 END), p.created_at DESC
   `);
 
   return rows.map((r) => ({
@@ -99,6 +108,7 @@ export async function createPlaylist(
 }
 
 export async function deletePlaylist(playlistId: string): Promise<void> {
+  if (playlistId === LIKED_SONGS_ID) return; // Cannot delete default Liked Songs
   const db = await getLocalDb();
   await db.runAsync(`DELETE FROM playlist_tracks WHERE playlist_id = ?`, [playlistId]);
   await db.runAsync(`DELETE FROM playlists WHERE id = ?`, [playlistId]);
@@ -112,6 +122,19 @@ export async function updatePlaylistPicture(
   const db = await getLocalDb();
   await db.runAsync(`UPDATE playlists SET picture_uri = ? WHERE id = ?`, [
     pictureUri,
+    playlistId,
+  ]);
+  playlistEvents.emit();
+}
+
+export async function updatePlaylistName(
+  playlistId: string,
+  name: string
+): Promise<void> {
+  if (playlistId === LIKED_SONGS_ID) return; // Liked Songs has fixed name
+  const db = await getLocalDb();
+  await db.runAsync(`UPDATE playlists SET name = ? WHERE id = ?`, [
+    name.trim(),
     playlistId,
   ]);
   playlistEvents.emit();
@@ -196,4 +219,68 @@ export async function getPlaylistTracks(playlistId: string): Promise<Track[]> {
     thumbnail: r.thumbnail,
     filePath: r.file_path,
   }));
+}
+
+export async function getPlaylistTrackIds(playlistId: string): Promise<string[]> {
+  const db = await getLocalDb();
+  const rows = await db.getAllAsync<{ track_id: string }>(
+    `SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC`,
+    [playlistId]
+  );
+  return rows.map((r) => r.track_id);
+}
+
+export async function getAllSavedTrackIds(): Promise<string[]> {
+  const db = await getLocalDb();
+  const rows = await db.getAllAsync<{ track_id: string }>(
+    `SELECT DISTINCT track_id FROM playlist_tracks`
+  );
+  return rows.map((r) => r.track_id);
+}
+
+export async function getTrackPlaylistIds(trackId: string): Promise<string[]> {
+  const db = await getLocalDb();
+  const rows = await db.getAllAsync<{ playlist_id: string }>(
+    `SELECT playlist_id FROM playlist_tracks WHERE track_id = ?`,
+    [trackId]
+  );
+  return rows.map((r) => r.playlist_id);
+}
+
+export async function reorderPlaylistTracks(
+  playlistId: string,
+  trackIdsInOrder: string[]
+): Promise<void> {
+  const db = await getLocalDb();
+  await db.withTransactionAsync(async () => {
+    for (let i = 0; i < trackIdsInOrder.length; i++) {
+      await db.runAsync(
+        `UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?`,
+        [i, playlistId, trackIdsInOrder[i]]
+      );
+    }
+  });
+  playlistEvents.emit();
+}
+
+export async function getPlaylistShuffle(playlistId: string): Promise<boolean> {
+  const db = await getLocalDb();
+  const row = await db.getFirstAsync<{ is_shuffled: number }>(
+    `SELECT is_shuffled FROM playlist_settings WHERE playlist_id = ?;`,
+    [playlistId]
+  );
+  return Boolean(row && row.is_shuffled === 1);
+}
+
+export async function setPlaylistShuffle(
+  playlistId: string,
+  isShuffled: boolean
+): Promise<void> {
+  const db = await getLocalDb();
+  await db.runAsync(
+    `INSERT INTO playlist_settings (playlist_id, is_shuffled)
+     VALUES (?, ?)
+     ON CONFLICT(playlist_id) DO UPDATE SET is_shuffled = excluded.is_shuffled;`,
+    [playlistId, isShuffled ? 1 : 0]
+  );
 }

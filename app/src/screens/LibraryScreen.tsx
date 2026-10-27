@@ -6,6 +6,7 @@ import {
   FlatList,
   ActivityIndicator,
   StyleSheet,
+  Alert,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { getLibrary } from "../api";
@@ -14,6 +15,7 @@ import { libraryEvents } from "../db/playlistEvents";
 import { usePlayer } from "../player/PlayerProvider";
 import TrackRow from "../components/TrackRow";
 import AddToPlaylistModal from "../components/AddToPlaylistModal";
+import { useLikedTracks } from "../hooks/useLikedTracks";
 import { colors, shared } from "../theme";
 
 export default function LibraryScreen() {
@@ -24,6 +26,7 @@ export default function LibraryScreen() {
   const [selectedTrackForPlaylist, setSelectedTrackForPlaylist] =
     useState<Track | null>(null);
 
+  const likedIds = useLikedTracks();
   const { playQueue } = usePlayer();
 
   const load = useCallback(async (q?: string) => {
@@ -62,8 +65,7 @@ export default function LibraryScreen() {
   }, [query, load]);
 
   function handleTap(track: Track, index: number) {
-    // Play the whole library as a queue starting from the tapped track
-    playQueue(tracks, index);
+    playQueue(tracks, index, "library");
   }
 
   return (
@@ -91,16 +93,24 @@ export default function LibraryScreen() {
         renderItem={({ item, index }) => (
           <TrackRow
             track={item}
+            isLiked={likedIds.has(item.id)}
             onPress={() => handleTap(item, index)}
-            onMorePress={() => setSelectedTrackForPlaylist(item)}
+            onPlaylistPress={() => setSelectedTrackForPlaylist(item)}
+            onMorePress={() => {
+              Alert.alert(item.title ?? "Track Options", undefined, [
+                {
+                  text: "Add to Playlist…",
+                  onPress: () => setSelectedTrackForPlaylist(item),
+                },
+                { text: "Cancel", style: "cancel" },
+              ]);
+            }}
           />
         )}
         ListEmptyComponent={
           !loading ? (
             <Text style={styles.empty}>
-              {query.trim()
-                ? "No tracks match your search"
-                : "Your library is empty — discover some music!"}
+              {query ? "No tracks match your search" : "No tracks in library yet"}
             </Text>
           ) : undefined
         }
@@ -110,6 +120,7 @@ export default function LibraryScreen() {
         track={selectedTrackForPlaylist}
         visible={!!selectedTrackForPlaylist}
         onClose={() => setSelectedTrackForPlaylist(null)}
+        autoLikeIfNew={true}
       />
     </View>
   );
@@ -118,15 +129,14 @@ export default function LibraryScreen() {
 const styles = StyleSheet.create({
   error: {
     color: "#ff5555",
-    paddingHorizontal: 14,
-    paddingBottom: 4,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
     fontSize: 13,
   },
   empty: {
     color: colors.textSecondary,
     textAlign: "center",
-    marginTop: 32,
+    marginTop: 48,
     fontSize: 14,
-    paddingHorizontal: 24,
   },
 });

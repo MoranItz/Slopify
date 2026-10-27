@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -9,9 +9,16 @@ import {
   ActivityIndicator,
   Alert,
   BackHandler,
+  PanResponder,
+  Animated,
+  Platform,
+  Modal,
+  TextInput,
+  KeyboardAvoidingView,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
 import { Playlist, Track } from "../types";
 import {
   getPlaylists,
@@ -19,14 +26,152 @@ import {
   deletePlaylist,
   getPlaylistTracks,
   removeTrackFromPlaylist,
+  reorderPlaylistTracks,
+  updatePlaylistPicture,
+  updatePlaylistName,
+  getPlaylistShuffle,
+  setPlaylistShuffle,
+  LIKED_SONGS_ID,
 } from "../db/localDb";
 import { playlistEvents } from "../db/playlistEvents";
 import { usePlayer } from "../player/PlayerProvider";
 import TrackRow from "../components/TrackRow";
+import AddToPlaylistModal from "../components/AddToPlaylistModal";
 import CreatePlaylistModal from "../components/CreatePlaylistModal";
+import { useLikedTracks } from "../hooks/useLikedTracks";
 import { colors, shared } from "../theme";
 
-export default function PlaylistsScreen() {
+const ROW_HEIGHT = 76;
+
+function formatPlaylistDuration(totalSec: number): string {
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  if (hours > 0) {
+    return `${hours} ${hours === 1 ? "hour" : "hours"} ${minutes} ${
+      minutes === 1 ? "minute" : "minutes"
+    }`;
+  }
+  return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+}
+
+// ── Draggable Row with Smooth Sliding Animation ─────────────────────
+type DraggableTrackRowProps = {
+  item: Track;
+  index: number;
+  isLiked: boolean;
+  onPress: () => void;
+  onPlaylistPress: () => void;
+  onMorePress: () => void;
+  animY: Animated.Value;
+  onDragStart: (index: number) => void;
+  onDragMove: (dy: number) => void;
+  onDragRelease: (
+    panY: Animated.Value,
+    scale: Animated.Value,
+    onDone: () => void
+  ) => void;
+};
+
+function DraggableTrackRow({
+  item,
+  index,
+  isLiked,
+  onPress,
+  onPlaylistPress,
+  onMorePress,
+  animY,
+  onDragStart,
+  onDragMove,
+  onDragRelease,
+}: DraggableTrackRowProps) {
+  const panY = useRef(new Animated.Value(0)).current;
+  const scale = useRef(new Animated.Value(1)).current;
+  const [isDragging, setIsDragging] = useState(false);
+
+  const stateRef = useRef({ index, onDragStart, onDragMove, onDragRelease });
+  stateRef.current = { index, onDragStart, onDragMove, onDragRelease };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 2,
+      onMoveShouldSetPanResponderCapture: (_, gesture) =>
+        Math.abs(gesture.dy) > 2,
+      onPanResponderGrant: () => {
+        setIsDragging(true);
+        panY.setValue(0);
+        stateRef.current.onDragStart(stateRef.current.index);
+        Animated.spring(scale, {
+          toValue: 1.04,
+          useNativeDriver: true,
+          tension: 110,
+          friction: 8,
+        }).start();
+      },
+      onPanResponderMove: (_, gesture) => {
+        panY.setValue(gesture.dy);
+        stateRef.current.onDragMove(gesture.dy);
+      },
+      onPanResponderRelease: () => {
+        stateRef.current.onDragRelease(panY, scale, () => {
+          setIsDragging(false);
+        });
+      },
+      onPanResponderTerminate: () => {
+        stateRef.current.onDragRelease(panY, scale, () => {
+          setIsDragging(false);
+        });
+      },
+    })
+  ).current;
+
+  return (
+    <Animated.View
+      style={[
+        styles.rowWrapper,
+        isDragging
+          ? {
+              transform: [{ translateY: panY }, { scale }],
+              zIndex: 9999,
+              elevation: 20,
+              backgroundColor: colors.cardHover,
+              borderRadius: 14,
+              borderColor: colors.accent,
+              borderWidth: 1.5,
+              shadowColor: colors.accent,
+              shadowOffset: { width: 0, height: 6 },
+              shadowOpacity: 0.6,
+              shadowRadius: 10,
+            }
+          : {
+              transform: [{ translateY: animY }],
+            },
+      ]}
+    >
+      <TrackRow
+        track={item}
+        isLiked={isLiked}
+        dragHandle={
+          <View {...panResponder.panHandlers} style={styles.dragHandle}>
+            <View
+              style={[
+                styles.dragLine,
+                isDragging && styles.dragLineActive,
+              ]}
+            />
+          </View>
+        }
+        onPress={onPress}
+        onPlaylistPress={onPlaylistPress}
+        onMorePress={onMorePress}
+      />
+    </Animated.View>
+  );
+}
+
+// ── Main Playlists Screen ───────────────────────────────────────────
+export default function PlaylistsScreen({ navigation }: any) {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(
     null
@@ -35,9 +180,41 @@ export default function PlaylistsScreen() {
   const [loading, setLoading] = useState(false);
   const [tracksLoading, setTracksLoading] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+
+  // Rename playlist state
+  const [isRenameOpen, setIsRenameOpen] = useState(false);
+  const [renameInput, setRenameInput] = useState("");
   const [isShuffleOn, setIsShuffleOn] = useState(false);
 
-  const { playQueue, currentTrack, isPlaying, togglePlay } = usePlayer();
+  // Playlist picker state for song row
+  const [selectedTrackForPlaylist, setSelectedTrackForPlaylist] =
+    useState<Track | null>(null);
+
+  // FlatList scroll lock when dragging
+  const [isDraggingActive, setIsDraggingActive] = useState(false);
+
+  const savedTrackIds = useLikedTracks();
+  const {
+    playQueue,
+    isPlaying,
+    togglePlay,
+    activeSourceId,
+    setShuffleActive,
+  } = usePlayer();
+
+  const playlistTracksRef = useRef(playlistTracks);
+  playlistTracksRef.current = playlistTracks;
+  const currentSelectedRef = useRef(selectedPlaylist);
+  currentSelectedRef.current = selectedPlaylist;
+
+  // Remove top navigation "Playlists" bar when viewing a playlist page
+  useEffect(() => {
+    if (navigation) {
+      navigation.setOptions({
+        headerShown: selectedPlaylist === null,
+      });
+    }
+  }, [navigation, selectedPlaylist]);
 
   const loadPlaylists = useCallback(async () => {
     try {
@@ -53,8 +230,12 @@ export default function PlaylistsScreen() {
   const loadTracks = useCallback(async (pl: Playlist) => {
     setTracksLoading(true);
     try {
-      const tracks = await getPlaylistTracks(pl.id);
+      const [tracks, isShuffled] = await Promise.all([
+        getPlaylistTracks(pl.id),
+        getPlaylistShuffle(pl.id),
+      ]);
       setPlaylistTracks(tracks);
+      setIsShuffleOn(isShuffled);
     } catch (e) {
       console.log("Error loading playlist tracks:", e);
     } finally {
@@ -62,15 +243,15 @@ export default function PlaylistsScreen() {
     }
   }, []);
 
-  // Hardware back button on Android: go back to playlists list instead of exiting/jumping tabs
+  // Hardware back button on Android
   useFocusEffect(
     useCallback(() => {
       const onBackPress = () => {
         if (selectedPlaylist) {
           setSelectedPlaylist(null);
-          return true; // consumed
+          return true;
         }
-        return false; // let system/navigation handle it
+        return false;
       };
 
       const subscription = BackHandler.addEventListener(
@@ -80,6 +261,7 @@ export default function PlaylistsScreen() {
       return () => subscription.remove();
     }, [selectedPlaylist])
   );
+
   useFocusEffect(
     useCallback(() => {
       loadPlaylists();
@@ -89,7 +271,6 @@ export default function PlaylistsScreen() {
     }, [loadPlaylists, selectedPlaylist, loadTracks])
   );
 
-  // Subscribe to real-time playlist events (when tracks are added/removed or playlists created/deleted)
   useEffect(() => {
     const unsubscribe = playlistEvents.subscribe(() => {
       loadPlaylists();
@@ -105,7 +286,6 @@ export default function PlaylistsScreen() {
     loadTracks(pl);
   };
 
-  // Keep track count and metadata in selectedPlaylist synced with current playlists state
   const currentSelected = selectedPlaylist
     ? playlists.find((p) => p.id === selectedPlaylist.id) ?? selectedPlaylist
     : null;
@@ -116,6 +296,10 @@ export default function PlaylistsScreen() {
   };
 
   const handleDelete = (pl: Playlist) => {
+    if (pl.id === LIKED_SONGS_ID) {
+      return;
+    }
+
     Alert.alert(
       "Delete Playlist",
       `Are you sure you want to delete "${pl.name}"?`,
@@ -136,32 +320,222 @@ export default function PlaylistsScreen() {
     );
   };
 
+  const handlePickPicture = async () => {
+    if (!currentSelected || currentSelected.id === LIKED_SONGS_ID) return;
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.85,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const uri = result.assets[0].uri;
+        await updatePlaylistPicture(currentSelected.id, uri);
+        await loadPlaylists();
+      }
+    } catch (e) {
+      console.log("Error picking image:", e);
+    }
+  };
+
+  const handleSaveRename = async () => {
+    if (!currentSelected || !renameInput.trim()) return;
+    try {
+      await updatePlaylistName(currentSelected.id, renameInput.trim());
+      setIsRenameOpen(false);
+      await loadPlaylists();
+    } catch (e) {
+      console.log("Error renaming playlist:", e);
+    }
+  };
+
   const handleRemoveTrack = async (track: Track) => {
     if (!currentSelected) return;
     await removeTrackFromPlaylist(currentSelected.id, track.id);
   };
 
-  const isCurrentTrackInPlaylist = Boolean(
-    currentTrack && playlistTracks.some((t) => t.id === currentTrack.id)
-  );
-  const isThisPlaylistPlaying = isCurrentTrackInPlaylist && isPlaying;
+  const isThisPlaylistPlaying =
+    isPlaying && activeSourceId === currentSelected?.id;
+
+  const handleToggleShuffle = async () => {
+    if (!currentSelected || playlistTracks.length === 0) return;
+    const newOn = !isShuffleOn;
+    setIsShuffleOn(newOn);
+    await setPlaylistShuffle(currentSelected.id, newOn);
+
+    if (activeSourceId === currentSelected.id) {
+      setShuffleActive(newOn, playlistTracks);
+    }
+  };
 
   const handlePlaylistPlayPress = () => {
-    if (playlistTracks.length === 0) return;
-    if (isCurrentTrackInPlaylist) {
+    if (playlistTracks.length === 0 || !currentSelected) return;
+    if (activeSourceId === currentSelected.id) {
       togglePlay();
     } else {
-      playQueue(playlistTracks, 0);
+      const startIdx = isShuffleOn
+        ? Math.floor(Math.random() * playlistTracks.length)
+        : 0;
+      playQueue(playlistTracks, startIdx, currentSelected.id, isShuffleOn);
     }
+  };
+
+  const startIndexRef = useRef<number>(-1);
+  const targetIndexRef = useRef<number>(-1);
+  const rowAnimsRef = useRef<{ [trackId: string]: Animated.Value }>({});
+
+  const getRowAnim = (id: string) => {
+    if (!rowAnimsRef.current[id]) {
+      rowAnimsRef.current[id] = new Animated.Value(0);
+    }
+    return rowAnimsRef.current[id];
+  };
+
+  const handleDragStart = (startIndex: number) => {
+    startIndexRef.current = startIndex;
+    targetIndexRef.current = startIndex;
+    setIsDraggingActive(true);
+  };
+
+  const handleDragMove = (gestureDy: number) => {
+    const startIndex = startIndexRef.current;
+    if (startIndex < 0) return;
+
+    const list = playlistTracksRef.current;
+    const count = list.length;
+    if (count <= 1) return;
+
+    const slotOffset = Math.round(gestureDy / ROW_HEIGHT);
+    const targetIndex = Math.max(
+      0,
+      Math.min(count - 1, startIndex + slotOffset)
+    );
+
+    if (targetIndex !== targetIndexRef.current) {
+      targetIndexRef.current = targetIndex;
+
+      for (let i = 0; i < count; i++) {
+        if (i === startIndex) continue;
+        const id = list[i].id;
+        const anim = getRowAnim(id);
+
+        let targetShift = 0;
+        if (startIndex < targetIndex && i > startIndex && i <= targetIndex) {
+          targetShift = -ROW_HEIGHT;
+        } else if (
+          startIndex > targetIndex &&
+          i < startIndex &&
+          i >= targetIndex
+        ) {
+          targetShift = ROW_HEIGHT;
+        }
+
+        Animated.spring(anim, {
+          toValue: targetShift,
+          useNativeDriver: true,
+          tension: 85,
+          friction: 9,
+        }).start();
+      }
+    }
+  };
+
+  const handleDragRelease = (
+    panY: Animated.Value,
+    scale: Animated.Value,
+    onDone: () => void
+  ) => {
+    const startIndex = startIndexRef.current;
+    const targetIndex = targetIndexRef.current;
+    const list = playlistTracksRef.current;
+
+    if (
+      startIndex < 0 ||
+      targetIndex < 0 ||
+      startIndex === targetIndex ||
+      targetIndex >= list.length
+    ) {
+      Animated.parallel([
+        Animated.spring(panY, {
+          toValue: 0,
+          useNativeDriver: true,
+          tension: 90,
+          friction: 9,
+        }),
+        Animated.spring(scale, {
+          toValue: 1,
+          useNativeDriver: true,
+          tension: 90,
+          friction: 9,
+        }),
+      ]).start(() => {
+        list.forEach((t) => getRowAnim(t.id).setValue(0));
+        startIndexRef.current = -1;
+        targetIndexRef.current = -1;
+        setIsDraggingActive(false);
+        onDone();
+      });
+      return;
+    }
+
+    const finalOffset = (targetIndex - startIndex) * ROW_HEIGHT;
+
+    Animated.parallel([
+      Animated.spring(panY, {
+        toValue: finalOffset,
+        useNativeDriver: true,
+        tension: 80,
+        friction: 9,
+      }),
+      Animated.spring(scale, {
+        toValue: 1,
+        useNativeDriver: true,
+        tension: 80,
+        friction: 9,
+      }),
+    ]).start(async () => {
+      // 1. Reset all shift anims and panY
+      list.forEach((t) => getRowAnim(t.id).setValue(0));
+      panY.setValue(0);
+      onDone();
+
+      // 2. Commit new order to state
+      const updated = [...list];
+      const [moved] = updated.splice(startIndex, 1);
+      updated.splice(targetIndex, 0, moved);
+      setPlaylistTracks(updated);
+
+      startIndexRef.current = -1;
+      targetIndexRef.current = -1;
+      setIsDraggingActive(false);
+
+      // 3. Persist to DB
+      const playlist = currentSelectedRef.current;
+      if (playlist) {
+        await reorderPlaylistTracks(
+          playlist.id,
+          updated.map((t) => t.id)
+        );
+      }
+    });
   };
 
   // ── VIEW: PLAYLIST DETAIL ──────────────────────────────────────────
   if (currentSelected) {
+    const isLikedPlaylist = currentSelected.id === LIKED_SONGS_ID;
+    const totalDurationSec = playlistTracks.reduce(
+      (sum, t) => sum + (t.duration ?? 0),
+      0
+    );
+
     return (
       <View style={shared.screen}>
         <FlatList
           data={playlistTracks}
           keyExtractor={(item) => item.id}
+          scrollEnabled={!isDraggingActive}
           ListHeaderComponent={
             <View style={styles.detailHeader}>
               <Pressable
@@ -173,36 +547,76 @@ export default function PlaylistsScreen() {
               </Pressable>
 
               <View style={styles.artContainer}>
-                <View style={styles.artFrame}>
+                <Pressable
+                  onPress={handlePickPicture}
+                  disabled={isLikedPlaylist}
+                  style={[
+                    styles.artFrame,
+                    isLikedPlaylist && styles.likedArtFrame,
+                  ]}
+                >
                   {currentSelected.pictureUri ? (
                     <Image
                       source={{ uri: currentSelected.pictureUri }}
                       style={styles.coverArt}
                     />
+                  ) : isLikedPlaylist ? (
+                    <View style={[styles.coverArt, styles.likedCover]}>
+                      <Ionicons name="heart" size={72} color="#FFF" />
+                    </View>
                   ) : (
                     <View style={[styles.coverArt, styles.artPlaceholder]}>
                       <Ionicons name="disc" size={60} color={colors.accent} />
                     </View>
                   )}
+
+                  {!isLikedPlaylist && (
+                    <View style={styles.editPhotoBadge}>
+                      <Ionicons name="camera" size={14} color="#FFF" />
+                    </View>
+                  )}
+                </Pressable>
+              </View>
+
+              <View style={styles.metaAndActionsRow}>
+                <View style={styles.detailMeta}>
+                  <View style={styles.titleRow}>
+                    <Text style={styles.detailTitle} numberOfLines={2}>
+                      {currentSelected.name}
+                    </Text>
+                    {!isLikedPlaylist && (
+                      <Pressable
+                        onPress={() => {
+                          setRenameInput(currentSelected.name);
+                          setIsRenameOpen(true);
+                        }}
+                        hitSlop={12}
+                        style={styles.pencilBtn}
+                      >
+                        <Ionicons
+                          name="pencil"
+                          size={18}
+                          color={colors.textSecondary}
+                        />
+                      </Pressable>
+                    )}
+                  </View>
+
+                  <Text style={styles.detailCount}>
+                    Playlist • {playlistTracks.length}{" "}
+                    {playlistTracks.length === 1 ? "track" : "tracks"}
+                  </Text>
+                  {playlistTracks.length > 0 && (
+                    <Text style={styles.detailDuration}>
+                      {formatPlaylistDuration(totalDurationSec)}
+                    </Text>
+                  )}
                 </View>
-              </View>
 
-              <View style={styles.detailMeta}>
-                <Text style={styles.detailTitle} numberOfLines={2}>
-                  {currentSelected.name}
-                </Text>
-                <Text style={styles.detailCount}>
-                  Playlist • {playlistTracks.length}{" "}
-                  {playlistTracks.length === 1 ? "track" : "tracks"}
-                </Text>
-              </View>
-
-              <View style={styles.actionRow}>
-                <View style={{ flex: 1 }} />
                 {playlistTracks.length > 0 && (
                   <View style={styles.actionsRight}>
                     <Pressable
-                      onPress={() => setIsShuffleOn((prev) => !prev)}
+                      onPress={handleToggleShuffle}
                       hitSlop={12}
                       style={styles.shuffleBtn}
                     >
@@ -236,11 +650,26 @@ export default function PlaylistsScreen() {
             </View>
           }
           renderItem={({ item, index }) => (
-            <TrackRow
-              track={item}
-              onPress={() => playQueue(playlistTracks, index)}
+            <DraggableTrackRow
+              item={item}
+              index={index}
+              isLiked={savedTrackIds.has(item.id)}
+              animY={getRowAnim(item.id)}
+              onPress={() =>
+                playQueue(
+                  playlistTracks,
+                  index,
+                  currentSelected?.id,
+                  isShuffleOn
+                )
+              }
+              onPlaylistPress={() => setSelectedTrackForPlaylist(item)}
               onMorePress={() => {
                 Alert.alert(item.title ?? "Track Options", undefined, [
+                  {
+                    text: "Add to other playlist…",
+                    onPress: () => setSelectedTrackForPlaylist(item),
+                  },
                   {
                     text: "Remove from Playlist",
                     style: "destructive",
@@ -249,6 +678,9 @@ export default function PlaylistsScreen() {
                   { text: "Cancel", style: "cancel" },
                 ]);
               }}
+              onDragStart={handleDragStart}
+              onDragMove={handleDragMove}
+              onDragRelease={handleDragRelease}
             />
           )}
           ListEmptyComponent={
@@ -267,6 +699,65 @@ export default function PlaylistsScreen() {
           }
           contentContainerStyle={{ paddingBottom: 80 }}
         />
+
+        <AddToPlaylistModal
+          track={selectedTrackForPlaylist}
+          visible={!!selectedTrackForPlaylist}
+          onClose={() => setSelectedTrackForPlaylist(null)}
+          autoLikeIfNew={true}
+        />
+
+        {/* ── Rename Playlist Modal ──────────────────────────────── */}
+        <Modal
+          visible={isRenameOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setIsRenameOpen(false)}
+        >
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            style={styles.modalOverlay}
+          >
+            <Pressable
+              style={styles.modalOverlay}
+              onPress={() => setIsRenameOpen(false)}
+            >
+              <Pressable
+                style={styles.renameCard}
+                onPress={(e) => e.stopPropagation()}
+              >
+                <Text style={styles.renameTitle}>Rename Playlist</Text>
+                <TextInput
+                  value={renameInput}
+                  onChangeText={setRenameInput}
+                  placeholder="Playlist name"
+                  placeholderTextColor={colors.textSecondary}
+                  style={styles.renameInput}
+                  autoFocus
+                  selectTextOnFocus
+                />
+                <View style={styles.renameBtnRow}>
+                  <Pressable
+                    style={styles.renameCancelBtn}
+                    onPress={() => setIsRenameOpen(false)}
+                  >
+                    <Text style={styles.renameCancelText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.renameSaveBtn,
+                      !renameInput.trim() && { opacity: 0.5 },
+                    ]}
+                    disabled={!renameInput.trim()}
+                    onPress={handleSaveRename}
+                  >
+                    <Text style={styles.renameSaveText}>Save</Text>
+                  </Pressable>
+                </View>
+              </Pressable>
+            </Pressable>
+          </KeyboardAvoidingView>
+        </Modal>
       </View>
     );
   }
@@ -295,49 +786,57 @@ export default function PlaylistsScreen() {
           data={playlists}
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8 }}
-          renderItem={({ item }) => (
-            <Pressable
-              onPress={() => openPlaylist(item)}
-              onLongPress={() => handleDelete(item)}
-              style={({ pressed }) => [
-                styles.playlistCard,
-                pressed && styles.pressed,
-              ]}
-            >
-              <View style={styles.cardCoverWrapper}>
-                {item.pictureUri ? (
-                  <Image
-                    source={{ uri: item.pictureUri }}
-                    style={styles.cardCover}
-                  />
-                ) : (
-                  <View style={[styles.cardCover, styles.artPlaceholder]}>
-                    <Ionicons
-                      name="musical-notes"
-                      size={28}
-                      color={colors.accent}
+          renderItem={({ item }) => {
+            const isLiked = item.id === LIKED_SONGS_ID;
+
+            return (
+              <Pressable
+                onPress={() => openPlaylist(item)}
+                onLongPress={() => !isLiked && handleDelete(item)}
+                style={({ pressed }) => [
+                  styles.playlistCard,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <View style={styles.cardCoverWrapper}>
+                  {item.pictureUri ? (
+                    <Image
+                      source={{ uri: item.pictureUri }}
+                      style={styles.cardCover}
                     />
-                  </View>
-                )}
-              </View>
+                  ) : isLiked ? (
+                    <View style={[styles.cardCover, styles.likedCardCover]}>
+                      <Ionicons name="heart" size={28} color="#FFF" />
+                    </View>
+                  ) : (
+                    <View style={[styles.cardCover, styles.artPlaceholder]}>
+                      <Ionicons
+                        name="musical-notes"
+                        size={28}
+                        color={colors.accent}
+                      />
+                    </View>
+                  )}
+                </View>
 
-              <View style={{ flex: 1 }}>
-                <Text style={styles.cardTitle} numberOfLines={1}>
-                  {item.name}
-                </Text>
-                <Text style={styles.cardSub}>
-                  {item.trackCount ?? 0}{" "}
-                  {item.trackCount === 1 ? "track" : "tracks"}
-                </Text>
-              </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.cardTitle} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                  <Text style={styles.cardSub}>
+                    {item.trackCount ?? 0}{" "}
+                    {item.trackCount === 1 ? "track" : "tracks"}
+                  </Text>
+                </View>
 
-              <Ionicons
-                name="chevron-forward"
-                size={20}
-                color={colors.textSecondary}
-              />
-            </Pressable>
-          )}
+                <Ionicons
+                  name="chevron-forward"
+                  size={20}
+                  color={colors.textSecondary}
+                />
+              </Pressable>
+            );
+          }}
           ListEmptyComponent={
             !loading ? (
               <View style={styles.emptyContainer}>
@@ -424,6 +923,16 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: colors.surface,
   },
+  likedCardCover: {
+    backgroundColor: colors.accent,
+    justifyContent: "center",
+    alignItems: "center",
+    shadowColor: colors.accent,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    elevation: 4,
+  },
   artPlaceholder: {
     justifyContent: "center",
     alignItems: "center",
@@ -443,25 +952,30 @@ const styles = StyleSheet.create({
   detailHeader: {
     paddingHorizontal: 20,
     paddingTop: 12,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    marginBottom: 8,
+    paddingBottom: 4,
+    marginBottom: 0,
   },
   backBtn: {
     alignSelf: "flex-start",
-    marginBottom: 12,
+    marginTop: 14,
+    marginBottom: 10,
+    padding: 6,
   },
   artContainer: {
     alignItems: "center",
-    marginBottom: 18,
+    marginBottom: 16,
   },
   artFrame: {
+    position: "relative",
     shadowColor: colors.accent,
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.35,
     shadowRadius: 16,
     elevation: 10,
+  },
+  likedArtFrame: {
+    shadowColor: colors.accent,
+    shadowOpacity: 0.55,
   },
   coverArt: {
     width: 170,
@@ -469,8 +983,36 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     backgroundColor: colors.surface,
   },
+  likedCover: {
+    backgroundColor: colors.accent,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  editPhotoBadge: {
+    position: "absolute",
+    bottom: 8,
+    right: 8,
+    backgroundColor: "rgba(23, 18, 38, 0.85)",
+    padding: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  metaAndActionsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 4,
+    marginBottom: 6,
+  },
   detailMeta: {
-    marginBottom: 8,
+    flex: 1,
+    paddingRight: 14,
+  },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   detailTitle: {
     color: colors.text,
@@ -478,22 +1020,25 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.3,
   },
+  pencilBtn: {
+    padding: 4,
+  },
   detailCount: {
     color: colors.textSecondary,
     fontSize: 14,
     marginTop: 4,
     fontWeight: "500",
   },
-  actionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 4,
+  detailDuration: {
+    color: colors.accent,
+    fontSize: 13,
+    marginTop: 2,
+    fontWeight: "600",
   },
   actionsRight: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 18,
+    gap: 14,
   },
   shuffleBtn: {
     padding: 8,
@@ -509,9 +1054,9 @@ const styles = StyleSheet.create({
     bottom: 2,
   },
   spotifyPlayBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
     backgroundColor: colors.accent,
     justifyContent: "center",
     alignItems: "center",
@@ -520,6 +1065,32 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.5,
     shadowRadius: 8,
     elevation: 6,
+  },
+  rowWrapper: {
+    height: ROW_HEIGHT,
+    justifyContent: "center",
+  },
+  dragHandle: {
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 4,
+    marginLeft: -6,
+  },
+  dragLine: {
+    width: 3,
+    height: 24,
+    borderRadius: 1.5,
+    backgroundColor: colors.border,
+  },
+  dragLineActive: {
+    backgroundColor: colors.accent,
+    width: 4,
+    shadowColor: colors.accent,
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    elevation: 4,
   },
   emptyContainer: {
     alignItems: "center",
@@ -549,5 +1120,65 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontWeight: "700",
     fontSize: 15,
+  },
+
+  // ── Modal styles for rename ──────────────────────────────
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.65)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  renameCard: {
+    width: "85%",
+    maxWidth: 360,
+    backgroundColor: colors.surface,
+    borderRadius: 18,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  renameTitle: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 14,
+  },
+  renameInput: {
+    backgroundColor: colors.card,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: colors.text,
+    fontSize: 15,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: 16,
+  },
+  renameBtnRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 12,
+  },
+  renameCancelBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  renameCancelText: {
+    color: colors.textSecondary,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  renameSaveBtn: {
+    backgroundColor: colors.accent,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  renameSaveText: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "700",
   },
 });

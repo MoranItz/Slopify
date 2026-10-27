@@ -7,7 +7,10 @@ import { colors, formatDuration } from "../theme";
 type Props = {
   track: Track;
   onPress: () => void;
+  onPlaylistPress?: () => void;
   onMorePress?: () => void;
+  isLiked?: boolean;
+  dragHandle?: React.ReactNode;
   /** Optional trailing element (e.g. a badge or button) */
   right?: React.ReactNode;
   busy?: boolean;
@@ -16,7 +19,10 @@ type Props = {
 export default function TrackRow({
   track,
   onPress,
+  onPlaylistPress,
   onMorePress,
+  isLiked,
+  dragHandle,
   right,
   busy,
 }: Props) {
@@ -25,6 +31,8 @@ export default function TrackRow({
       onPress={onPress}
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
     >
+      {dragHandle}
+
       {track.thumbnail ? (
         <Image source={{ uri: track.thumbnail }} style={styles.thumb} />
       ) : (
@@ -43,10 +51,24 @@ export default function TrackRow({
 
       {right}
 
+      {onPlaylistPress && (
+        <Pressable
+          onPress={onPlaylistPress}
+          hitSlop={10}
+          style={styles.actionBtn}
+        >
+          <Ionicons
+            name={isLiked ? "checkmark-circle" : "add-circle-outline"}
+            size={22}
+            color={isLiked ? colors.accent : colors.textSecondary}
+          />
+        </Pressable>
+      )}
+
       {onMorePress && (
         <Pressable
           onPress={onMorePress}
-          hitSlop={12}
+          hitSlop={10}
           style={styles.moreBtn}
         >
           <Ionicons
@@ -98,17 +120,20 @@ const styles = StyleSheet.create({
   },
   sub: {
     color: colors.textSecondary,
-    fontSize: 13,
-    marginTop: 3,
+    fontSize: 12,
+    marginTop: 4,
   },
   busy: {
-    color: colors.accent,
-    fontSize: 12,
-    marginTop: 3,
-    fontWeight: "500",
+    color: colors.sunsetOrange,
+    fontSize: 11,
+    marginTop: 2,
+    fontWeight: "600",
+  },
+  actionBtn: {
+    padding: 6,
+    marginRight: 2,
   },
   moreBtn: {
-    padding: 8,
-    marginLeft: 4,
+    padding: 6,
   },
 });

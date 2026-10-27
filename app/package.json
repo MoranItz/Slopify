@@ -8,6 +8,7 @@
     "@react-navigation/native": "^7.5.1",
     "expo": "~58.0.19",
     "expo-audio": "~58.0.10",
+    "expo-image-picker": "~58.0.10",
     "expo-sqlite": "~58.0.14",
     "expo-status-bar": "~58.0.4",
     "react": "19.3.0",
