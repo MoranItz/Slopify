@@ -52,10 +52,10 @@ def get_track_by_id(track_id: str) -> dict | None:
 def list_tracks(query: str | None = None) -> list[dict]:
     conn = get_db_connection()
     try:
-        if query:
-            pattern = f"%{query}%"
+        if query and query.strip():
+            pattern = f"%{query.strip()}%"
             rows = conn.execute(
-                "SELECT * FROM tracks WHERE title LIKE ? OR artist LIKE ? ORDER BY title",
+                "SELECT * FROM tracks WHERE title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE ORDER BY title",
                 (pattern, pattern),
             ).fetchall()
         else:
